@@ -56,7 +56,6 @@ One row per profile; the notes are each profile's `README.md`.
 | [ANIMAL WELL](010020D01AD24000/README.md) | `010020D01AD24000` | 1.0.10 | 20.5.7 | its own (not named) | NVN |
 | [Animal Crossing: New Horizons](01006F8002326000/README.md) | `01006F8002326000` | 3.0.3 | 20.5.4 | Nintendo EPD (sead / agl / gsys) | NVN |
 | [Atelier Ryza: Ever Darkness & the Secret Hideout DX](0100199023B2E000/README.md) | `0100199023B2E000` | 1.2.0 | 18.3.2 | Gust's engine on Koei Tecmo's KTGL | NVN |
-| [Axiom Verge](0100052004384000/README.md) | `0100052004384000` | 1.0.5 | 12.3.3 | MonoGame | NVN |
 | [Baba Is You](01002CD00A51C000/README.md) | `01002CD00A51C000` | 1.0.12 | 19.3.3 | Multimedia Fusion 2 game on MP2 Games' runtime (Lua) | NVN |
 | [BALL x PIT](010086A022444000/README.md) | `010086A022444000` | 1.293 | 20.5.19 | Unity 6000.0.62f1 IL2CPP | NVN |
 | [Balatro](0100CD801CE5E000/README.md) | `0100CD801CE5E000` | 1.1.3 | 18.3.2 | LÖVE 11.4 (love-nx, LuaJIT, SDL) | OpenGL |
@@ -91,7 +90,6 @@ One row per profile; the notes are each profile's `README.md`.
 | [DRAGON QUEST VII Reimagined](0100A9D01C446000/README.md) | `0100A9D01C446000` | 1.2.0 | 19.3.1 | Unreal Engine 4.27 | NVN |
 | [DRAGON QUEST XI S: Echoes of an Elusive Age – Definitive Edition](01006C300E9F0000/README.md) | `01006C300E9F0000` | 1.0.4 | 7.3.2 | Unreal Engine 4.18 | NVN |
 | [EA SPORTS FC 27](0100C49025D3E000/README.md) | `0100C49025D3E000` | 1.8d.310c | 22.2.0 | Frostbite 2025.1.2 (its NVN renderer in an NRO) | NVN |
-| [ENDER LILIES: Quietus of the Knights](0100CCF012E9A000/README.md) | `0100CCF012E9A000` | 1.1.5c | 10.4.0 | Unreal Engine 4 | NVN |
 | [FINAL FANTASY CRYSTAL CHRONICLES Remastered Edition](0100CE4010AAC000/README.md) | `0100CE4010AAC000` | 1.0.3 | 8.2.1 | Unity 2018.4.2f1 IL2CPP, FMOD | NVN |
 | [FINAL FANTASY RESONANCE](0100606026F12000/README.md) | `0100606026F12000` | 1.0.1 | 20.5.17 | Unreal Engine 5.6.1 | NVN |
 | [FINAL FANTASY RESONANCE, Asian release](0100B8A026F14000/README.md) | `0100B8A026F14000` | 1.0.1 | 20.5.17 | Unreal Engine 5.6.1 | NVN |
@@ -132,7 +130,7 @@ One row per profile; the notes are each profile's `README.md`.
 | [Octopath Traveler 0](01005270232F2000/README.md) | `01005270232F2000` | 1.0.5 | 19.3.13 | Unreal Engine 5 | NVN |
 | [OCTOPATH TRAVELER II](0100A3501946E000/README.md) | `0100A3501946E000` | 1.1.1 | 12.3.2 | Unreal Engine 4.27 | NVN |
 | [ŌKAMI HD](0100276009872000/README.md) | `0100276009872000` | 1.0.0 (base) | 4.5.0 | Clover Studio's PS2 engine, remastered; CRIWARE | NVN |
-| [Ori and the Blind Forest: Definitive Edition](010061D00DB74000/README.md) | `010061D00DB74000` | 1.0.2 | 8.2.0 | Unity IL2CPP | NVN |
+| [Ori and the Blind Forest: Definitive Edition](010061D00DB74000/README.md) | `010061D00DB74000` | 1.0.2 | 8.2.0 | Unity 2018.4.1f1 IL2CPP, FMOD | NVN |
 | [Paper Mario: The Origami King](0100A3900C3E2000/README.md) | `0100A3900C3E2000` | 1.0.1 | 8.3.1 | Intelligent Systems' engine on NintendoWare | NVN |
 | [Paper Mario: The Thousand-Year Door](0100ECD018EBE000/README.md) | `0100ECD018EBE000` | 1.0.1 | 15.3.2 | Intelligent Systems' engine on NintendoWare | NVN |
 | [Patrick's Parabox](0100E44016C22000/README.md) | `0100E44016C22000` | 1.0.1 | 13.3.7 | Unity 2020.3.30f1 IL2CPP | NVN |

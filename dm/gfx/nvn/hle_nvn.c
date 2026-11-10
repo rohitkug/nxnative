@@ -1517,6 +1517,7 @@ static void sleep_until_ns(uint64_t dl);
 static uint64_t present_period(const win_t *o);
 static uint64_t rt_period_ns(const win_t *o, uint64_t period);
 static int present_itv(const win_t *o);
+static int present_unpaced(const win_t *o);
 static int link_wait(const win_t *o, uint64_t timeout_ns);
 __attribute__((weak)) void dm_main_yield_stats(uint64_t *n, uint64_t *ns) { *n = 0; *ns = 0; }   // The host's hle_thread.c provides the ground truth; 0 in graphics unit tests
 __attribute__((weak)) uint32_t dm_guest_work_qos(unsigned *count) { if (count) *count = 0; return QOS_CLASS_UNSPECIFIED; }
@@ -1542,9 +1543,8 @@ NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsyn
         if (rtp && rt_period != rtp) { rt_period = rtp; set_time_constraint(rtp); }
         rt_comp_tick(rtp);
         uint64_t p0 = now_ns(); int snap = mtl_snap_on();
-        if (present_itv(o) == 0) {
-            // Unthrottled pacing when interval 0 is allowed: bypass display-link and target waits
-        } else if (snap && mtl_link_active() && mtl_link_stalled()) { if (wait) sleep_until_ns(at); }   // present snapshots (nvn_mtl.m) while the display link is silent (the window in the background or covered):
+        if (present_unpaced(o)) {}   // present interval 0: no vsync wait (below); only the free texture the ticket wait below gives
+        else if (snap && mtl_link_active() && mtl_link_stalled()) { if (wait) sleep_until_ns(at); }   // present snapshots (nvn_mtl.m) while the display link is silent (the window in the background or covered):
             // frames are dropped as fast as they come and nothing frees a ring slot later, so the texture's slot time paces the game: unpaced, Breath of the Wild ran 3 to 4.5 times real time there.
             // Otherwise snapshots take the display link's wait below like any present. The wait for a free ring slot (mtl_snap_acquire_wait) alone did not pace: the link takes frames in
             // order and drops all but the newest two, and a dropped frame frees its slot, so Donkey Kong Bananza at the 30 fps cap ran 43-65 fps of game time and dropped about 110 of every 300 frames
@@ -1956,16 +1956,15 @@ static void present_cfg(const win_t *o) {
     LOG("[nvn] present tick %d Hz, interval mode %s (%s; present interval set by the game %d; %s)", g_hz, g_display_mode ? "display (one frame per tick, a cut)" : "game (original semantics)",
         m ? "DM_PRESENT_INTERVAL" : "game profile present_interval", o->interval, scr > 0 ? "window" : "no window");
 }
-static int present_zero_allowed(void) {
-    static int allowed = -1;
-    if (allowed < 0) {
-        const char *e = getenv("DM_PRESENT_INTERVAL_ZERO");
-        allowed = e ? atoi(e) != 0 : DM_GAME_PRESENT_INTERVAL_ZERO;
-        if (allowed) LOG("[nvn] present interval 0 unthrottled pacing enabled (%s)", e ? "DM_PRESENT_INTERVAL_ZERO" : "game profile present_interval_zero");
-    }
-    return allowed;
-}
-static int present_itv(const win_t *o) { int c = fps_present_cap(), k = atomic_load(&g_fs_k); return c ? (k && fstep_on() ? k : fstep_hz() / c) : g_display_mode ? 1 : (o->interval == 0 && present_zero_allowed()) ? 0 : o->interval > 0 ? o->interval : 1; }   // vsyncs per frame that presentation follows
+static int present_itv(const win_t *o) { int c = fps_present_cap(), k = atomic_load(&g_fs_k); return c ? (k && fstep_on() ? k : fstep_hz() / c) : g_display_mode ? 1 : o->interval > 0 ? o->interval : 1; }   // vsyncs per frame that presentation follows
+// Present interval 0 swaps without waiting for a vsync on Horizon: the window's acquire waits only for a texture the display has let go of, the display shows the newest frame at each
+// vsync, and the game paces itself (or runs as fast as it can; the Switch's unlocked-frame-rate mods set interval 0 to go past 60). The acquire took it as 1 and waited a display
+// tick each frame. Ori and the Blind Forest: Definitive Edition sets Unity's vSyncCount to 0 only for its shader prewarm behind the first loading screen and back to 1 after it: the
+// prewarm draws shaders until a per-frame time budget runs out and waits 15 frames whenever it drew 2 or fewer, and each draw waits for the graphics worker, which sat in that tick
+// wait, so the loading screen took about 5 minutes. Presentation keeps one frame per display tick (the display link drops the older frames waiting, nvn_mtl.m: there Ori made
+// 446 frames in 315 ticks, 146 dropped), and the acquire's ticket wait still holds a texture until the frame it showed is taken or dropped. A host frame cap (fps_target, the
+// frame step) or display mode decides the pacing itself and keeps it
+static int present_unpaced(const win_t *o) { present_cfg(o); return o->interval == 0 && !g_display_mode && !fps_present_cap(); }
 // The present interval the game reads back (nvnWindowGetPresentInterval): the one it set, except in display mode, where the window presents at the interval above (1, or the cap's)
 // whatever the game set, and answering the game's own let it pace for that interval itself. Luigi's Mansion 3 (30 fps on the Switch, interval 2) reads the newest frame-history entry
 // and the interval before each present (main+0xb7a4b8): while that frame is not shown it sleeps 16.67 ms per vsync of the interval, and once shown it waits until (interval - 1)
@@ -1989,15 +1988,14 @@ static int link_wait(const win_t *o, uint64_t timeout_ns) {
 }
 static uint64_t present_period(const win_t *o) {
     present_cfg(o);
-    int itv = present_itv(o);
-    int was = atomic_load(&g_game_itv), want = itv ? itv : (o->interval > 0 ? o->interval : 1);
+    int was = atomic_load(&g_game_itv), want = o->interval > 0 ? o->interval : 1;
     if (want != was) {
         atomic_store(&g_game_itv, want);
         if (want < 2 || want % 2) atomic_store(&g_itv2_since, 0);   // an odd interval needs the 60 Hz link: 3 vsyncs on a 30 Hz link were 2 ticks, 15 fps for 20
         else if (was < 2 || was % 2) atomic_store(&g_itv2_since, now_ns() | 1);   // | 1: the start is never 0
     }
-    int hz = g_hz;
-    return (hz > 0 && itv > 0) ? (uint64_t)itv * 1000000000ull / (uint64_t)hz : 0;
+    int itv = present_itv(o), hz = g_hz;
+    return hz > 0 ? (uint64_t)itv * 1000000000ull / (uint64_t)hz : 0;
 }
 // The period the acquire thread declares to the scheduler (set_time_constraint): the present period, except that a hold the frame step raised for late frames keeps the cap's deadline.
 // Declaring the longer hold let the performance controller move the game to the efficiency cores at half the clock (TOTK on an iPhone: 3.4 → 1.5 GHz and 65% → 5% on performance
@@ -2236,7 +2234,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     uint64_t period = present_period(o), now = dm_detclock_enabled() ? guest_ns() : now_ns();
     g_hold_ring[o->presents % 16] = (uint8_t)present_itv(o);
     nvn_pacer pc = {o->pace};
-    uint64_t slot = now + (period ? nvn_pace(&pc, now, period) : 0);
+    uint64_t slot = now + nvn_pace(&pc, now, period);
     o->pace = pc.target;
     if (idx >= 0 && idx < 4) o->avail[idx] = period ? slot + period : 0;
     static uint64_t prev_slot; if (prev_slot && period) trow(f, "@display_ms", (slot - prev_slot) / 1e6); prev_slot = slot;   // display interval between two adjacent frames on screen (this is the one to look at for dropped frames)

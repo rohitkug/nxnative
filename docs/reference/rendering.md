@@ -861,6 +861,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** the builder's mode now goes to the texture (`tex_t.stencil`), whose sampling view is the `X32_Stencil8` one a stencil-mode texture view already got.
 - **Found on:** [DRAGON QUEST VII Reimagined](../../dm/games/0100A9D01C446000/README.md) (the character occlusion mask, `edbfc7a088be545e`).
 
+### The provoking vertex is the first
+
+- **Symptom:** `[RED] NVN unimplemented function called: nvnCommandBufferSetProvokingVertexMode`, once.
+- **Cause:** the call was not implemented. NVN2's driver writes its mode into the 3D class's `SET_PROVOKING_VERTEX` (method 0x1684), 0 for the first vertex of a primitive and 1 for the last.
+- **Fix:** mode 0 needs nothing: Metal's flat values come from the first vertex. Mode 1 has no Metal setting and is reported once (`[RED] nvnCommandBufferSetProvokingVertexMode 1 (the last vertex)`); open until a game sets it.
+- **Found on:** [PRAGMATA](../../dm/games/0400C76024710000/README.md), which sets mode 0.
+
 ### Conservative rasterization remains unimplemented
 
 - **Symptom:** `[nvn] SetConservativeRasterEnable on: ignored by host for now`, followed by `[RED] NVN unimplemented function called: nvnCommandBufferSetConservativeRasterDilate`.
@@ -1495,6 +1502,13 @@ The Vulkan layer (`dm/gfx/vk/hle_vk.m`) was written for Hades; Super Mario Galax
 - **Cause:** the replay binds every element of an array the shader takes, and a set may still name an image view the game has destroyed (the hardware reads a descriptor only when a draw samples it). The layer's descriptors were pointers to its own view, sampler and buffer structs.
 - **Fix:** a descriptor now holds the texture, sampler state and buffer it was written with (retained), as a hardware descriptor holds a copy of the handle.
 - **Found on:** [Super Mario Galaxy 2](../../dm/games/0100FD8022DAA000/README.md) (issue 68). Through the opening and the first storybook stage the game allocates 22,785 descriptor sets and frees none, and destroys only 5 image views (and 1,244 images), so a stale element is rare: a Mac run that kept destroyed objects to catch their binds found none there.
+
+### Descriptor copies into a binding with immutable samplers
+
+- **Symptom:** a texture copied into a combined-image-sampler binding with immutable samplers is sampled with the source's sampler (its filtering, addressing, LOD clamps), not the one the layout fixed.
+- **Cause:** `vkUpdateDescriptorSets` copied each descriptor whole (`*t = *s`), so a copy replaced the sampler state the set's allocation had put in place from the layout. Vulkan's updates, copies as well as writes, change only the image of a combined image sampler whose binding has immutable samplers, and a sampler-only copy into such a binding is not allowed. The write path (`desc_write`) already kept the sampler.
+- **Fix:** copies go through `desc_copy` in `dm/gfx/vk/hle_vk.m`: the source descriptor whole, but the destination's sampler stays when its binding has immutable samplers (`lbind.imm`). A source's immutable sampler is part of its descriptor and is copied into a binding without them. `dm/gfx/tests/t_vk_desc.m` checks both directions.
+- **Found on:** no game: a report reproduced it in `t_vk_desc.m` (source sampler A, destination immutable sampler B; after the copy the destination held A).
 
 ### An unwritten secondary blend source
 

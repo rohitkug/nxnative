@@ -87,6 +87,7 @@ def load_module(name, path):   # a module from a file (another script, or a tool
 bench = load_module('bench', REPO / 'scripts/bench.py')
 shader_regressions = load_module('shader_regressions', REPO / 'dm/gfx/tools/shader_regressions.py')
 usage = load_module('usage', REPO / 'dm/tools/usage.py')   # usage manifests and change impact (regress.py usage / impact)
+run_saves = load_module('run_saves', REPO / 'dm/tools/run_saves.py')   # cloud saves off in every run (run_env)
 proc_group = load_module('proc_group', REPO / 'dm/tools/proc_group.py')   # a heavy job in a process group of its own, stopped whole (run_heavy)
 tree_tar = load_module('tree_tar', REPO / 'dm/tools/tree_tar.py')   # a work folder's quiet folders as one file each, and an old revision's compile cache
 shader_cache = load_module('shader_cache', REPO / 'dm/tools/shader_cache.py')   # the per-game regression compile cache, with read-only reuse of the player's
@@ -455,7 +456,7 @@ def regression_cache(tree, g, a):
 
 def shader_cache_gb(value):
     try: n = float(value)
-    except ValueError: raise argparse.ArgumentTypeError('the shader cache limit must be a number in GiB')
+    except ValueError: raise argparse.ArgumentTypeError('the shader cache limit must be a number in GiB') from None
     if not math.isfinite(n) or n < 1 / 1024: raise argparse.ArgumentTypeError('the shader cache limit must be at least 1 MiB (0.0009765625 GiB)')
     return n
 
@@ -1023,9 +1024,8 @@ def run_env(g, art, route, outdir, a):
         if not (prof / 'pso_pairs.tsv').is_file() and (g.build / 'shader/pso_pairs.tsv').is_file(): env['DM_PSO_PAIRS'] = str(g.build / 'shader/pso_pairs.tsv')
     if (g.build / 'aoc').is_dir(): env['DM_AOC_DIR'] = str(g.build / 'aoc')
     for kv in a.env: k, _, v = kv.partition('='); env[k] = v
-    if env.get('DM_SAVE_SYNC', '0') not in ('', '0') and any(kv.partition('=')[0] == 'DM_SAVE_SYNC' for kv in a.env):
-        raise HarnessError('--env DM_SAVE_SYNC: a run does not sync its save with a cloud (dm/host/tests/t_save_sync.c covers cloud saves)')
-    env['DM_SAVE_SYNC'] = '0'   # cloud saves off: one inherited from the shell would pull the player's cloud save into the route and send the run's over it (save_sync.c names the file by title ID)
+    try: run_saves.cloud_off(env, run_saves.asked(a.env))   # last, after every override: cloud saves off (dm/tools/run_saves.py)
+    except run_saves.CloudSync as e: raise HarnessError(f'--env {e}') from None
     return env, src_save
 
 
@@ -1784,7 +1784,9 @@ def main():
     if missing and a.cmd != 'impact': ap.error(f'set {" and ".join(missing)}: where the harness keeps its trees and reports, and the folder of the games\' NSP folders, for example '
                          f'regress.py --root <drive>/harness --games-dir <drive>/nsp {a.cmd} ... (the options go before the command)')
     ROOT, GAMES = Path(a.root), Path(a.games_dir)
-    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))   # a stop runs the finally blocks: a game or a shader build in its own process group is stopped too
+    # A stop runs the finally blocks: a game or a shader build in its own process group is stopped too. A SIGHUP (the terminal closed) the same way: the shell sends it to its
+    # job, which that group, a session of its own (proc_group), is not in, and its default action ended this script with no cleanup and left the game or build running
+    for sig in (signal.SIGTERM, signal.SIGHUP): signal.signal(sig, lambda s, _: sys.exit(128 + s))
     try:
         if a.cmd == 'list': return cmd_list(a)
         if a.cmd == 'impact': return cmd_impact(a)

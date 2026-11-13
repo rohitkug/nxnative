@@ -279,6 +279,27 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** a game whose `main` imports `MountSaveData` too gets its device save as `<DM_SAVE>_device`, a transaction of its own (`hle_fs.c`); of the games on hand only this one imports both, so Animal Crossing's islands stay where they are.
 - **Found on:** [Mario Kart 8 Deluxe](../../dm/games/0100152000022000/README.md) (4.0.0, SDK 4.4.0; one boot).
 
+### A rename between two mounts
+
+- **Symptom:** `RenameFile("save:/a", "rom:/a")` succeeded and wrote into the read-only RomFS folder; a rename between two writable mounts, or between two names of one host save, moved the file.
+- **Cause:** `rename_entry` in `hle_fs.c` checked that the source's mount is writable and resolved the destination without looking at its mount. Horizon's `fs::RenameFile` and `fs::RenameDirectory` find each path's file system by its mount name and refuse two before touching either (Atmosphère's `fs_user_filesystem.cpp`: the two accessors must be one, else `ResultRenameToOtherFileSystem`, module 2 description 6034); only a rename between the SDK's own mount and the host's was refused, with `RES_FAIL`.
+- **Fix:** `rename_any` compares the two mount names (the part before `:`, as `FindFileSystem` takes it) and answers `0x2F2402` for two, before the SDK or the host is asked; one mount's rename goes on as before, and a read-only source is refused by its own check. Account and device saves that share a host folder and transaction are two mounts on Horizon too, so a rename between them is refused as well. `make -C dm/host/tests GAME=<id> run` (`t_fs`, ⑦b) renames into a read-only mount, into another writable one and between two names of one save, and checks both paths afterwards.
+- **Found on:** a code audit's reproduction (2026-11-13); no game has been seen to rename between mounts.
+
+### A folder that cannot be read is listed short
+
+- **Symptom:** after a read error on a folder (`EIO`, an external drive going to sleep), files of a read-only mount are not found for the rest of the run; `CleanDirectoryRecursively` succeeds with files left; a listing or count is short with no error.
+- **Cause:** `readdir` returns NULL both at a folder's end and on a failure, and only `errno` tells them apart. Every loop in `hle_fs.c` took NULL for the end: the name index of a read-only folder (`dir_index_get`) was kept for the whole run without the names after the failure, the path walk answered "not found", and the clean, the listing (`ReadDirectory`), the count and the overlay snapshot went on with what they had.
+- **Fix:** `dir_next` in `hle_fs.c` gives the next entry without `.` and `..`, and NULL with `errno` 0 at the end or set on a failure; the name index, the path walk, the recursive delete and clean, `ReadDirectory`, `GetDirectoryEntryCount` and the overlay snapshot (`OpenDirectory`) use it and fail on a failure. A name index that could not be read is not kept, so the next lookup reads the folder again. `make -C dm/host/tests GAME=<id> fs-directory` (`t_fs_directory`) fails a folder's reading at once and after one entry in each of them.
+- **Found on:** a code audit's reproduction with an injected `EIO` (2026-11-13); no game log has shown it.
+
+### Opening a large folder with an overlay set takes seconds
+
+- **Symptom:** with `DM_ROMFS_OVERLAY` set, `OpenDirectory` on a RomFS folder of tens of thousands of entries takes seconds, during which every other path call waits for the path lock.
+- **Cause:** the overlay snapshot (`dir_snapshot` in `hle_fs.c`) compared each name it gathered with every name gathered before it, the base folder's own too, to drop a name a layer repeats: n(n−1)/2 comparisons, 722 million for 38,000 names.
+- **Fix:** the snapshot gathers every layer's names, then `names_first` sorts (name, position) once and keeps each name's first, in the order gathered, so the listing is the same as before (the last overlay folder first, then the base, an image base in its table order). Measured on an M4 Pro, a read-only folder of 4-byte files under an empty overlay folder: 10,000 entries 0.19 s → 0.03 s, 38,000 entries 3.23 s → 0.20 s; what is left grows linearly (each name's layer is looked up for its type and size). `t_fs_directory` checks a name in several layers, names differing in case and the layers' order.
+- **Found on:** a code audit's synthetic measurement (2026-11-13). No game runs with an overlay by default.
+
 ### System data stand-in for the MiiModel archive
 
 - **Symptom:** abort in `fs::detail::GetFileSystemProxyServiceObject` under `fs::QueryMountSystemDataCacheSize` (`main+0x8f23bc`).
@@ -549,6 +570,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Cause:** the SDK's vibration graph flushes queued values with `hid::detail::SendVibrationValues`, which opens the hid service. The game sets handles on its `VibrationTarget`s even when the host reports no vibration device.
 - **Fix:** the flush calls it through the PLT, so an `HLE_FORCE` on that symbol catches it and returns success (`hle_hid.c`).
 - **Found on:** [Metroid Dread](../../dm/games/010093801237C000/README.md).
+
+### Forced vibration sessions
+
+- **Symptom:** at boot, `[RED] sf: the game connects to service hid itself`, then `CRASH sig=11 addr=0` in `hid::detail::EndPermitVibrationSession` (`sdk+0x3526bc` in SDK 9.4), under `hid::EndForcedVibrationSession`.
+- **Cause:** the SDK's own call opens the hid service, which sm refuses, and reads the null service object. A forced session lets an application vibrate while the system's vibration setting is off.
+- **Fix:** `hle_hid.c` answers `BeginForcedVibrationSession` and `EndForcedVibrationSession` with nothing to do. The host has no system vibration setting: its own rumble switch is the player's, and a session does not override it.
+- **Found on:** Super Mario Party (`010036B0034E4000`, no profile yet), [#2513](https://github.com/seedds/nxnative/issues/2513): the crash came before its first frame; with the fix it reaches the opening.
 
 ### Whether a vibration device is mounted
 

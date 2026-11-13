@@ -24,24 +24,19 @@ def membar_fence(msl):
     msl = re.sub(r'^([ \t]*)' + re.escape(_MEMBAR) + r'\n\1' + re.escape(_MEMBAR) + r'$', lambda m: m[1] + _MEMBAR, msl, flags=re.M)
     return msl.replace(_MEMBAR, fence)
 
-TG_FENCE_DECL = re.compile(r'\bthreadgroup\s+(?:spvUnsafeArray<[^;&]*?>|[A-Za-z_][\w<>, ]*?)\s*&?\s*(\w+)\s*(?:\[[^\]]*\])?\s*[;,)]')
 TG_FENCE = 'atomic_thread_fence(mem_flags::mem_threadgroup, memory_order_seq_cst, thread_scope_simdgroup);'
+TG_FENCE_FN = re.compile(r'\bvoid dmsh_tg_fence\(\)\s*\{')
 def tg_fence(src):
-    """A store to threadgroup memory followed by a load of another lane's word, with no barrier between them (Ampere compilers rely on lockstep warps for small
-    scans, e.g. Unreal's GPU radix sort downsweep d032ce5090303e01 at 0x2eb0: STS / LDS [x-4] / STS / LDS [x-8]): for one thread the load and the earlier store do not
-    alias, so Metal moves the load above the store and reads another lane's old value (Orbitals: Niagara's sorted index list wrong every frame, beams and particles broken).
-    A simdgroup-scope memory fence after each threadgroup store keeps the order; it is not an execution barrier, so it is safe in divergent code. Only kernels with a
-    threadgroup array are touched. A plain or compound assignment (SPIRV-Cross folds a load, an operation and a store of the same element into `_46[i] += 1u;`), also to a
-    member or component (`_39[i].x = v;`). From uncraftablexd's Orbitals bring-up (PR #1775)"""
-    names = {m.group(1) for m in TG_FENCE_DECL.finditer(src) if m.group(1) not in ('operator',)}
-    if not names: return src
-    store = re.compile(r'^(\s*)(?:%s)\s*\[[^\n;]*\](?:\.\w+)?\s*(?:[-+*/%%&|^]|<<|>>)?=(?!=)[^\n]*;\s*$' % '|'.join(map(re.escape, sorted(names))))
-    out = []
-    for ln in src.split('\n'):
-        out.append(ln)
-        m = store.match(ln)
-        if m: out.append(m.group(1) + TG_FENCE)
-    return '\n'.join(out)
+    """Warp-synchronous shared memory. Ampere code relies on lockstep warps and leaves the barrier out of small scans (Unreal's GPU radix sort downsweep d032ce5090303e01
+    at 0x2eb0: STS / LDS [x-4] / STS / LDS [x-8]); for one thread the load and the earlier store do not alias, so Metal moves the load above the store and reads another
+    lane's old value (Orbitals: Niagara's sorted index list wrong every frame, PR #1775). The translator calls dmsh_tg_fence() before each shared memory load that some path
+    reaches from a shared memory store with no barrier between (SharedMemoryFence.cs). Its body there is a memory barrier at workgroup scope, which SPIRV-Cross prints as a
+    threadgroup_barrier (and membar_fence as a device fence); here it becomes a simdgroup-scope fence on threadgroup memory, which is the order a warp needs and, not being
+    an execution barrier, safe in divergent code. A kernel whose arrays spill to device memory gets the device scope too (tg_spill, after this). The text rule before it put a
+    fence after every threadgroup store: 25,108 in 699 of Ocarina of Time's shaders, and Apple's compiler crashed on a foliage mesh pipeline on an M2 (GitHub issue #2481)"""
+    m = TG_FENCE_FN.search(src)
+    if not m: return src
+    return src[:m.end()] + '\n    ' + TG_FENCE + '\n' + src[block_end(src, m.end() - 1):]
 
 # spirv-cross writes OpUMulExtended / OpSMulExtended as calls of an optnone template, spvMulExtended, as Metal's compiler may fail on an inlined mulhi (spirv_msl.cpp,
 # SPVFuncImplMulExtended). The barrier keeps every product a call that is never folded: Switch 2 shaders divide by constants through the high word of a product (Ocarina of Time
@@ -356,6 +351,25 @@ def shared_store_msl(msl):
         u += len('using namespace metal;\n'); src = src[:u] + SHARED_ALIAS + src[u:]
     return src
 
+# A compute shader's local size as the kernel's [[max_total_threads_per_threadgroup]]. A Metal compute pipeline's maxTotalThreadsPerThreadgroup is not fixed at 1,024: on GPUs without
+# Dynamic Caching (the M1 and M2, applegpu_g13* / g14*, and the iPhone GPUs of their generation) it falls with the registers the kernel's code takes, 1,024 threads at up to 52 32-bit
+# registers, 512 at up to 104, 384 at 128, and the GPU compiler chooses the registers without knowing the size the host will dispatch. The host dispatches the Switch shader's own local size
+# (nvn_mtl.m), so a kernel compiled past that size's budget gets a dispatch larger than its pipeline allows, which runs no invocation: Ocarina of Time's froxel light injection 9ed48d1011f1b48b
+# (8x8x8) took 128 registers on applegpu_g14g once its 195 uniform reads at computed offsets were bounded as selects (918e9f34) and 104, exactly the 512-thread budget, as plain reads, and its
+# 128x72x96 volumes stayed zero on M2s, so the forest haze was gone (issue #2425); on the M3 and later (g15 / g16) every size up to 1,024 fits and the code is the same with the attribute.
+# With it, the compiler fits the kernel to the size (spilling where it must), as it does for a pipeline descriptor's maxTotalThreadsPerThreadgroup. Only sizes above 384 get it: 128
+# registers, the most a thread has, still allow 384, so no smaller size can be refused, and on g13 / g14 the attribute changes the code of most kernels that already fit (a 64-thread kernel's
+# registers and spill go down a little), which those sizes are left out of. The line goes before the kernel's, which tools match at the start of a line. local: the translator's [x, y, z];
+# a missing or out-of-range size leaves the shader as it is
+MAX_THREADS = 1024   # Metal's limit for a compute threadgroup on every Apple GPU
+ALWAYS_FITS = 384   # threads a pipeline allows at the most registers a thread can take (128) on g13 / g14
+
+def max_threads(msl, local):
+    if not local or len(local) != 3 or any(not isinstance(v, int) or v < 1 for v in local): return msl
+    n = local[0] * local[1] * local[2]
+    if n <= ALWAYS_FITS or n > MAX_THREADS or '[[max_total_threads_per_threadgroup(' in msl: return msl
+    return re.sub(r'^(kernel void main0\()', '[[max_total_threads_per_threadgroup(%d)]]\n\\1' % n, msl, count=1, flags=re.M)
+
 # Compute shared memory past Metal's limit: Apple's GPUs give a kernel 32 KB of threadgroup memory (maxThreadgroupMemoryLength), and Metal refuses a pipeline that declares more, while Ampere
 # gives up to 100 KB. Mario Kart World's DrivePassShaderDefault has 168 compute shaders of 48 KB (spvUnsafeArray<uint, 12288>), seven of them run on the way to the first race; refused, their
 # dispatches were skipped. Such a kernel takes its threadgroup arrays from a device buffer the host binds (abi.TG_SLOT): one slice of the arrays' total per workgroup, at the workgroup's index in
@@ -581,7 +595,7 @@ def frag_z_snap(msl):
 # what the zero weight makes of it. With blending off, on a target that is not floating point, or with a weight the alpha does not make zero, the output's bits are 0 and it is returned as
 # it is: NVIDIA stores that NaN or Inf too. A finite colour is never changed, nor the alpha.
 # Not covered, as a shader cannot see it: a NaN or Inf already in the target under a zero destination weight, and a non-finite weight on a colour of 0.
-# The guard goes into main0 before the build makes its other entry points, so each of them has it: they call main0's body (dmsh_side.shared_body: main0_u / main0_m, main0_d, main0_f and
+# The guard goes into main0 before the build makes its other entry points, so each of them has it: they call main0's body (dmsh_side.shared_body: main0_u, main0_d, main0_f and
 # the side library's) and take main0's parameters, the word's among them. It is written as a call, not as stores to out, which dmsh_entry.fs_uint reads to tell what a shader writes
 BLEND_ZERO = '''struct dm_blend_state { uint zero; };   // see dmsh_rewrite.py blend_zero
 static inline __attribute__((always_inline)) float4 dm_bz(float4 c, uint m)

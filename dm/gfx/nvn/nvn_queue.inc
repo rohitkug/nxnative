@@ -112,6 +112,7 @@ static void nq_cost_end(nq_cost c) {
 static void *nq_worker(void *unused) {
     (void)unused; pthread_setname_np("NVN queue replay");
     pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE,0);
+    void *rt=nvn_rt_join("queue replay thread");   // it carries the frame's submissions: it declares the frame's deadline too (hle_nvn.c rt_tick)
     uint64_t frame=UINT64_MAX;
     for(;;) {
         pthread_mutex_lock(&nq_mu); nq_queue *q=NULL; nq_node *n=NULL; nq_job *j=NULL;
@@ -164,6 +165,7 @@ static void *nq_worker(void *unused) {
         pthread_mutex_unlock(&nq_mu);
         uint64_t fence=0, present=0, copy=0;
         if(n->kind==NQ_COMMANDS || n->kind==NQ_PRESENT) {
+            nvn_rt_tick(rt);
             dm_host_mutex_lock(&g_sub_mu); void *pool=objc_autoreleasePoolPush();
             dm_host_work++; mtl_prepare(); dm_host_work--;
             gfx_enter(); nq_cost cost=nq_cost_begin();
@@ -253,7 +255,8 @@ void nvn_queue_submit(queue_t *q,int count,const uint64_t *handles) {
 uint64_t nvn_queue_present(queue_t *q,const tex_t *t,double period,const int crop[4]) {
     nvn_cap_queue(q->serial,0);
     pthread_once(&nq_once,nq_start); nq_job *j=calloc(1,sizeof *j); if(!j) die("queue present allocation failed");
-    j->receipt=nq_new(); j->frame=dm_nvn_frame_count(); nq_node *n=nq_append(j,NQ_PRESENT);
+    j->receipt=nq_new(); j->frame=dm_nvn_frame_count(); { void mtl_present_recorded(uint64_t); mtl_present_recorded(j->frame); }   // the game's own present count, for the screen wait (nvn_mtl.m)
+    nq_node *n=nq_append(j,NQ_PRESENT);
     n->texture=*t; mtl_tex_pin(t->serial); n->period=period; if(crop) memcpy(n->crop,crop,sizeof n->crop);
     pthread_mutex_lock(&nq_mu); j->receipt->refs++; uint64_t ticket=(uintptr_t)j->receipt;
     nq_enqueue(nq_get(q),j); pthread_mutex_unlock(&nq_mu); return ticket;

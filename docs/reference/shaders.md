@@ -2190,6 +2190,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Note:** the host's network rounds each HMMA's f16 accumulator once per 8 products, as the translated helper does since [HMMA rounds its f16 accumulator once per 8 products](#hmma-rounds-its-f16-accumulator-once-per-8-products) (resolved; before that both rounded after every product, as `simdgroup_half8x8` does, and differed from the Switch in the low bits of most HMMAs). The host's network follows the helper, and `test_ndve_engine.py` fails when the two differ.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#frame-rate): its title and opening movies ([issue 1375](https://github.com/seedds/nxnative/issues/1375), PR #1894).
 
+### An interrupted compute compile broke the NDVE sequence
+
+- **Symptom:** green and grey striped blocks over the opening movie after `XPC_ERROR_CONNECTION_INTERRUPTED`. The host logs `[RED] NDVE engine: a dispatch out of the network's order` and disables the engine for the rest of the run.
+- **Cause:** when Apple's `MTLCompilerService` died, NVN dispatch cached the interrupted compute compile as a permanent failure. The dispatch returned before the NDVE engine saw the layer, so the next layer looked out of order. The game's fallback then ran with the same dispatch missing.
+- **Fix:** recognized NDVE dispatches reach the engine after resource preparation and before the translated pipeline lookup. If the engine falls back, the host leaves interrupted compiles retryable on a later dispatch and caches permanent refusals.
+- **Check:** `t_dispatch_pipeline` injects the Metal error through the real dispatch path, checks that the next fallback dispatch writes its result, and checks that NDVE advances through the two reported layers without asking Metal for the first layer's fallback.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game), on an M2 MacBook Air on macOS 27.0 ([issue #2920](https://github.com/seedds/nxnative/issues/2920)).
+
 ### Driver-segment reads outside fragment shaders
 
 - **Symptom:** a vertex or compute shader reads zeros from NVN's driver segment `c0`.
@@ -2383,6 +2391,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Check:** `test_dmsh_raw_noinline.py` covers inline mesh code, already-rewritten inputs used by composed mesh libraries, unchanged non-mesh stages, idempotence and a real Metal compile. Offline verification exports every full manifest row through the production host, retaining differing descriptors even when rows share a shader triple; the linked game note records its coverage and results.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#mesh-compiler-workaround-validation), the later M1/M2 reports in [#2825](https://github.com/seedds/nxnative/issues/2825) and [#2911](https://github.com/seedds/nxnative/issues/2911).
 - **Remaining:** affected-device retests are recorded in the game note. [Recovery of archives poisoned before the host fix](rendering.md#an-archive-period-written-after-the-compiler-service-died) remains separate; this workaround changes no host recovery or serialization.
+
+### Inlining mesh helpers with subgroup inputs can crash the Metal compiler
+
+- **Symptom:** a native mesh pipeline fails to compile with `XPC_ERROR_CONNECTION_INTERRUPTED`. The compiler report shows SIGBUS at `llvm::MachineOperand::setReg` under the mesh backend. In-flight compiles in the same service can also fail.
+- **Cause:** SPIRV-Cross's translated helpers and the generated stage body are forced into the mesh entry points at `-O1`. Relaxing that policy cleared the failure on an M2 Pro with macOS 27.0.1. Ordinary inlining still reproduced it offline at the 26.6 minimum. Forcing only the stage body out of line cleared the isolated row, with failures elsewhere in the batch. Forcing only the helpers that take subgroup inputs out of line cleared the entire batch. The earlier raw-search failure shares a backend stack signature. The relationship between the internal defects is unknown.
+- **Fix:** `mesh_subgroup_noinline` marks SPIRV-Cross's multiline helpers with `gl_Subgroup*` parameters `noinline` in final native mesh stages. It changes only those declarations, so the generated stage body and raw search stay forced inline. This is a workaround for Apple's backend.
+- **Check:** `test_dmsh_raw_noinline.py` checks that the rewrite selects the subgroup helper and preserves the raw search, stage body and other helpers. The isolated foliage pipeline reproduces the original SIGBUS in the offline backend on `g14s` at minimum 26.6. The subgroup helper rewrite clears the isolated pipeline and all 164 rows on the five checked targets.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#mesh-compiler-workaround-validation), from [d4kine's isolation in PR #3069](https://github.com/seedds/nxnative/pull/3069).
 
 ### 128-bit raw global loads read one word at a time
 

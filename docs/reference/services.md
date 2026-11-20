@@ -418,6 +418,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Found on:** [Super Mario Odyssey](../../dm/games/0100000000010000/README.md); [Hollow Knight: Silksong](../../dm/games/010013C00E930000/README.md).
 - **Note:** Odyssey's six-axis history is read the same way ([Six-axis sensors](#six-axis-sensors)).
 
+### Mac controller sticks past full tilt on a diagonal
+
+- **Symptom:** with a DualSense on the Mac, both analog sticks move the character or camera erratically while the D-pad works (Persona 3 Portable 1.0.2).
+- **Cause:** a Switch stick's calibrated value stays inside the circle of radius `DM_STICK_MAX`, but a Mac or iPhone controller's axes each reach full tilt on their own through GameController, so a diagonal reads up to about 1.15 of full tilt. A game that takes the stick's magnitude as at most full tilt got more than it could.
+- **Fix:** `hle_hid.c` holds each stick inside that circle, keeping its direction, for every npad state it fills (`stick_circle`, in `fill` and `fill_joy`). A stick inside the circle is unchanged.
+- **Found on:** Persona 3 Portable ([#3050](https://github.com/seedds/nxnative/pull/3050)).
+- **Check:** `t_hid` puts a full-tilt diagonal on both sticks and checks that each stays inside the circle and keeps its direction. On the Mac, Persona 3 Portable's sticks move normally with a DualSense after the change.
+
 ### Npad style set update event
 
 - **Symptom:** the game never reads the controller (the title's "Press L+R" never sees a press; no `GetNpadState` call at all).
@@ -961,6 +969,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** `SetLayerCrop` only records the crop for the present ([The NVN present crops by the vi layer crop](rendering.md#the-nvn-present-crops-by-the-vi-layer-crop)); `DestroyLayer`, `CloseDisplay` and `vi::Finalize` are host no-ops. Also hooked: `vi::GetIndirectImageMemoryRequirement` (asked by the inline keyboard's `GetImageMemoryRequirement`, [The inline keyboard as a resident library applet](#the-inline-keyboard-as-a-resident-library-applet)); `vi::ListDisplays` (one display, "Default"; the game lists 10 into a stack buffer and does not read them, `main+0x808f08`), found from the import list before it was met. `vi::OpenDisplay("Default")` returns the same static display as `OpenDefaultDisplay`, so applications can open the name returned by `ListDisplays` without entering the SDK's absent service client.
 - **Found on:** [The Legend of Zelda: Link's Awakening](../../dm/games/01006BB00C6F0000/README.md) (SDK 8.2.0); [Super Mario 3D World + Bowser's Fury](../../dm/games/010028600EBDA000/README.md) (SDK 10: `vi::GetIndirectImageMemoryRequirement`); [The Great Ace Attorney Chronicles](../../dm/games/010036E00FB20000/README.md) (SDK 10.4.1: `vi::ListDisplays`); Alien: Isolation (SDK 8.2.0: `vi::OpenDisplay`).
 
+### The display's largest layer from `vi::ListDisplays`
+
+- **Symptom:** A game draws into a 3840x2160 swapchain on a 4K display and sets `WindowCrop 0,0 1920x1080`.
+- **Cause:** The game sizes its docked window from the largest layer in `ListDisplays` (`DisplayInfo` +0x50 and +0x58), then caps it at `QueryDisplayBufferMaxResolution`. The host hardcoded 1920x1080 in the first call, so the 4K cap in the second call could not raise the window size.
+- **Fix:** `hle_vi.c` shares [the display's largest buffer](#the-displays-largest-buffer) between both replies for Switch 2 SDKs. Switch 1 SDKs get 1920x1080 from `ListDisplays`.
+- **Found on:** [Star Fox](../../dm/games/0400E88025B1A000/README.md) ([issue #2895](https://github.com/seedds/nxnative/issues/2895)).
+
 ### `vi::InitializeWithVrrLfcEnabled`
 
 - **Symptom:** SIGSEGV reading address 0 in `SdkMutexType::Lock` (`sdk+0x171ef8`) right after graphics initialize, under `nn::vi2::InitializeWithVrrLfcEnabled`.
@@ -1461,6 +1476,13 @@ Most service calls can be found before they crash, before the first boot or the 
   - The adjustable user clock (`time::AdjustableUserSystemClock::GetCurrentTime`, which the game's days follow) reads the time service's shared memory in the SDK (`MonotonicSystemClock::GetCurrentTime`, `sdk+0x4421cc`), which the host never maps, so it is the host's clock, as the user clock; `time::GetStandardSteadyClockCurrentTimePoint`, the free-function form of the steady clock ([Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md) SDK 20.5.4, found in `main`'s imports before the first boot).
   - `time::StandardSteadyClock::now()`, the C++ clock form: a time point of seconds in `x0`. The SDK asks the steady-clock session `time::Initialize` opens and returns 0 without one (SDK 3.7.0, `sdk+0x16edf4` in [Mega Man Legacy Collection](../../dm/games/01002D4007AE0000/README.md), which calls it from six sites in `main`); the host takes over `Initialize` and opens none, so the clock never moved. It is the host's monotonic seconds, as `GetCurrentTimePoint`. Reported in [PR #2729](https://github.com/seedds/nxnative/pull/2729).
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md), [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md), [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md), [Mega Man Legacy Collection](../../dm/games/01002D4007AE0000/README.md).
+
+### A game restart reports a user clock change
+
+- **Symptom:** after a normal game restart on the same Mac, Pokémon Brilliant Diamond can record a new time penalty and skip daily or weekly events.
+- **Cause:** the first user clock context in each process subtracts the whole-second steady time from the whole-second wall time. The result depends on the sampling phase and can vary by one second without a wall-clock adjustment. The context refresh also compared the wall time to guest ticks, which can stop while the steady clock keeps running.
+- **Fix:** bracket the wall-time read with steady-clock reads, subtract at nanosecond precision, and round the resulting offset to whole seconds. Use that clock pair for the snapshot and retain the existing in-process refresh threshold of more than one whole second. `t_time` runs the first sample at two phases in fresh processes and checks the threshold, forward and backward adjustments, and elapsed time while guest ticks are suspended.
+- **Found on:** [Pokémon Brilliant Diamond](../../dm/games/0100000011D90000/README.md) 1.3.0 on macOS. The change covers game restarts on the same host boot.
 
 ### The adjustable network clock aborts in `Adjust`
 

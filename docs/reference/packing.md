@@ -180,6 +180,35 @@
 - **Fix:** with `DMSH_TABLE_MEMO` set to a folder, each tool keeps a line per shader there (`c1_guard.memo`, `cb_extent.memo`): the SHA-256 of the files it read, then its answer. The next run takes the answer of every shader whose files hash the same and analyses the rest. The NSP script sets it to its shader cache folder for the build and for `chain_tables`. The memo's first line is a fingerprint of `c1_guard.py`, `cb_extent.py`, `dmsh_abi.py` and the header it reads (`dm/gfx/nvn/dmsh_abi.h`: the binding kinds `cb_extent.py` filters on), so an edit to any of them starts it empty. It holds the last run's answers only (6.5 MB for Ocarina of Time). Without the variable nothing is hashed.
 - **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game) v131072 on an M3 Max: both tables in 95.1 s without the memo, 96.8 s with an empty one and 6.5 s from a full one, byte-identical after the header in all three runs. `dm/tools/tests/test_nsp_chain.py` (`TableTools`: the same tables from the memo, its answer used, changed bytes analysed again, another version's memo not taken).
 
+### A cold build spends half a minute on the c1 and uniform extent tables
+
+- **Symptom:** after the last shader of a cold full build, `dmsh_build.py` keeps every core busy for about another half minute before it prints `c1_full.tsv: …` and `cb_extent.tsv: …`: Tears of the Kingdom's 28,669 shaders on an M5 Pro, 33 s of a 507 s build when the build runs them. The tools alone on a finished library: 27 s, and 14 s for Breath of the Wild.
+- **Cause:** `c1_guard.py` and `cb_extent.py` spent their time in patterns over each shader's whole MSL. The interval arithmetic was 1% of it.
+  - `definitions_of` scanned every shader with a c1 read or a bounded uniform read for its temporaries: the declarations twice, the assignments once. It was 85% of `c1_guard.py` and 52% of `cb_extent.py`. Most indices are literals and ask for no definition: of 484 sampled shaders with a c1 read, 11 have a temporary in an index.
+  - `ASSIGNMENT` starts with a lookbehind or an alternation, and `cb_extent.py` ran two patterns that start with `\b` for each binding of each shader (45% of its time). `re` tries such a pattern at every character ([Rewrites that try every character of a large source](shaders.md#rewrites-that-try-every-character-of-a-large-source)).
+- **Fix:** the same answers from less scanning, in the two tools.
+  - `Definitions` makes `definitions_of` when `Interval` first looks a temporary up.
+  - `definitions_of` counts the declarations in the scan that collects them. It finds the assignments with `ASSIGNED`, `ASSIGNMENT`'s first form with its literal first, when the text has no `++` and no `--`: the other two forms need one. A text with one takes `ASSIGNMENT` as before.
+  - `cb_extent.py` `uses_of` counts a binding's uses and its declaration with `str.find` and the characters on both sides.
+  - The memo's fingerprint covers both tools, so the first build after this fills the memo again.
+- **Measurement:** M5 Pro (18 cores), Python 3.13, the Mac library image, no memo, the two tools one after the other as the build runs them, best of three.
+
+  | Both tools, wall (CPU) | Before | After |
+  |---|---|---|
+  | Tears of the Kingdom, 28,669 shaders | 26.7 s (458 s) | 5.0 s (79 s) |
+  | Breath of the Wild, 19,592 | 14.3 s (241 s) | 3.0 s (45 s) |
+  | Pokémon Scarlet, 30,142 | 24.2 s (417 s) | 4.8 s (76 s) |
+
+  A whole cold Mac build of Tears of the Kingdom, one run each: 507.1 to 490.9 s. The two tools inside it: 33.3 s (543 s of CPU) to 10.5 s (109 s). The rest of the build, the same work in both, took 473.8 and 480.4 s.
+
+  Both tables of the three games are the same line for line after the header, which holds the time of the run, and so are the two whole builds' tables.
+- **Open:**
+  - Reading a vertex shader's body once was measured and not taken. Its MSL holds `main0`'s body in `main0`, `main0_z` and `main0_gs`, and the copies are 55% of a library's text. Dropping them halves the unchanged tools (26.7 to 13.3 s) and saves 1.4 s after this change (5.0 to 3.6 s), for a check of the three entry points' forms.
+  - The memo ([A reuse build spends a minute and a half on the c1 and uniform extent tables](#a-reuse-build-spends-a-minute-and-a-half-on-the-c1-and-uniform-extent-tables)) no longer gains on these games: a run from a full memo is 4.9 s for Tears of the Kingdom, since every file is still read and hashed. Not measured on Ocarina of Time, which the memo was written for.
+  - `ACCESS` also starts with `\b` and is most of what `c1_guard.py` still costs.
+- **Found on:** [Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md#found-on-this-game), in a profile of its cold Mac build.
+- **Check:** `dm/gfx/tests/test_table_scans.py`: the assignment scan against the plain one, definitions made only for a temporary, `uses_of` against the two patterns.
+
 ### Every second build signs the whole Mac app again
 
 - **Symptom:** a build's last stage shows `Mac app · game files` without `(reused, signed)` and signs for three minutes, though the game files did not change and the build before it showed `game files (reused, signed)`; a build that changed nothing still shows `Mac app · pipeline archive` and signs for half a minute. Ocarina of Time (a 36 GB app) on an M3 Max: `Mac app` took 3:33 in the build after one where it took 1:11, and four packs that each changed one small file took 8 s, 220 s, 8 s and 220 s.
@@ -461,9 +490,24 @@
 
 - **Symptom:** the game shows `?` where it shows its version (Super Mario Bros. Wonder's title screen: `Ver. ?`), and the build's lines name the version as `v327680 (?)`.
 - **Cause:** a package with no control data (a NUP update, a dump) packed from a derived profile, here because the folder had no base game for the shader tables. `derive_profile` took the display version of the build row it writes from the package's `control.nacp` alone and wrote `?` without one, and the host answers `nn::oe::GetDisplayVersion` from that row by `main`'s build ID (`hle_sdk16.c`). The profile it derives from registered that very build, with its display version.
-- **Fix:** `derive_profile` takes the package's control data first, then the display version the profile registers for this `main` build, and `?` only for a build no row names.
+- **Fix:** `derive_profile` takes the package's control data first, then the display version the profile registers for this `main` build. The selected package's numeric label can supply the version when those sources have no answer.
 - **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md) (1.2.1, v327680, an update-only NUP; `main` ff773e90…, the registered build): `Ver. ?` before, `Ver. 1.2.1` after, one Mac boot each to the title screen.
 - **Check:** `dm/tools/tests/test_nsp_alias.py` `test_derived_profile_keeps_the_display_version_the_profile_registers_for_the_build`.
+
+### An unregistered NUP build loses its numeric version label
+
+- **Symptom:** the title menu of a game packed from a NUP with a version label shows `version: ?`.
+- **Cause:** the NUP has no NACP and the profile has no matching build. The packer discarded the NUP label and wrote `?` into the derived build row that `nn::oe::GetDisplayVersion` reads.
+- **Fix:** the survey, derived profile and app read the selected package's version label from the NUP. The label accepts one to three ASCII numeric components, an optional `v` and up to 15 version bytes. A label equal to the package's `v<number>` tag is ignored. The label stays with its package and is read again on each build.
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) 1.8.0. The reporter rebuilt the game and verified the title menu. Reading the local NUP and deriving its profile also gave `1.8.0` for both the build row and bundle metadata. [Issue #2902](https://github.com/seedds/nxnative/issues/2902)
+
+### An app packed without control data says version 1.0
+
+- **Symptom:** Finder shows `Version 1.0` for a Mac app whose game is at another version.
+- **Cause:** the app packer got its version from the game's NACP. A dump or NUP can have no NACP, leaving the bundle packer to write its default even when another source identifies the version.
+- **Fix:** Mac apps and IPAs take the packed version's NACP first, then the numeric version from the packed build's profile row, then the base game's NACP, then the selected NUP package's version label. The build can read the base NACP from the NUP even when it only extracts the update. With no usable value the app defaults to `1.0`.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md). The author rebuilt the Mac app from a NUP whose selected update was labelled `1.1.1` and checked both version fields in `Info.plist`. The local NUP has neither a NACP nor a display label. The profile registers `1.1.1` for its verified v131072 build ID, which gives the local build the same app version. [PR #2822](https://github.com/seedds/nxnative/pull/2822)
+- **Check:** `dm/tools/tests/test_nsp_nup.py` exercises the app fallback through the packing entry point with a synthetic NUP and the registered Ocarina of Time build IDs.
 
 ### No Game language row in an app packed from a NUP or a dump
 
@@ -471,6 +515,14 @@
 - **Cause:** `settings.py` shows the row when the game's `control.nacp` lists more than one language, and two cases gave it none. A NUP update may carry no control data: the NSP script's language check fell back to the base game's file, but the Mac settings got only the update's path, and `build_ipa.sh`'s fallback (`$W/data/v0`) is a folder the NSP script does not make. And there may be no NACP at all: the Yoshi and the Mysterious Book and [Age of Imprisonment](../../dm/games/04003F40232DE000/README.md) NUPs carry none in any package, and an FTP dump such as Bananza's has no control data.
 - **Fix:** `languages_control` in `build_ipa_from_nsp.py` picks the file once (the packed version's, else the base game's), for the check, `mac_app` and `build_ipa.sh` (`CONTROL`). With no list, `settings.py` offers every language with a note, as `game_language` and `DM_LANG` already accept any. Age of Imprisonment shows a language it lacks as English (Russian, Portuguese) and has more text languages than its voice folders suggest (Dutch, Simplified Chinese), so a game's list cannot be read from its folders.
 - **Found on:** code reading and the NUP records of the two games above, with [PR #1182](https://github.com/seedds/nxnative/pull/1182); boots of [Age of Imprisonment](../../dm/games/04003F40232DE000/README.md) to its first settings screen. Not confirmed on Bananza by the reporters.
+
+### An app packed from a NUP's update has no icon
+
+- **Symptom:** the Mac app has the system's blank application icon (no `AppIcon.icns` in its `Contents/Resources`), though the NUP carries the game's icon.
+- **Cause:** the NUP has the icon on its base game's record and none on the update's. `pack_version` saved the packed package's own records only, and the NSP script looks for `icon.jpg` in the packed version's folder, then in the folder the base game is extracted to alone. A profile that builds from the update only makes no such folder, so the base game's icon was never written.
+- **Fix:** `pack_nup.control` gives an update without an icon its base game's (the icon record, else its localized icons, as for its own). The NACP stays the package's own, since its display version and languages are that version's.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) (v131072). The profile builds from the update alone, and its Mac app had no icon because the NUP's 256×256 JPEG was on the base record. The [PR #2823](https://github.com/seedds/nxnative/pull/2823) author applied the fix to an older main revision and repacked the Mac app. The update's extraction contained the base game's `icon.jpg`, the app contained `AppIcon.icns` with the game's artwork, and the signature verified.
+- **Check:** `dm/tools/tests/test_nsp_nup.py` `test_update_without_an_icon_takes_its_base_games`.
 
 ### A Mac front end's default settings change Metal execution paths
 

@@ -95,7 +95,7 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 
 - **Symptom:** `newTextureViewWithPixelFormat` takes a large share of the replay thread (45% in Age of Calamity) when a game registers textures into a ring of IDs before every bind.
 - **Cause:** KTGL registers a texture into the next ID of a ring before every bind (`RegisterTexture`, `GetTextureHandle` and `BindTexture` counts are equal: 8,000 a frame in battle, up to 28,000 after the cutscene). Only 1 in 6 registrations repeated what the ID held, so the per-ID view (`treg_t.view`) was rebuilt for half of all binds.
-- **Fix:** views are also kept by the Metal texture they view and the view parameters (4 per texture), for as long as the owner holds that texture (a live or ghost entry, a pin or the sharing table: `own_holds_locked`), and dropped at the first commit after it lets the texture go (`vc_commit`, from the owner's list of released objects, `own_gone_take_locked`) or when its pool is finalized; a registration identical to what the ID holds keeps its view and the registration generation (`vc_get` in `nvn_mtl.m`). Kept by serial until PR #2542; the key by Metal texture also covers [finalized textures read through a registered ID](#texture-views-re-made-for-finalized-textures-every-submission) and [render targets initialized again every frame](frame-rate.md#texture-views-made-again-for-render-targets-initialized-again-every-frame).
+- **Fix:** views are also kept by the Metal texture they view and the view parameters (8 per texture; 4 until [same-pass feedback views](frame-rate.md#same-pass-feedback-views-made-at-every-draw) shared the cache), for as long as the owner holds that texture (a live or ghost entry, a pin or the sharing table: `own_holds_locked`), and dropped at the first commit after it lets the texture go (`vc_commit`, from the owner's list of released objects, `own_gone_take_locked`) or when its pool is finalized; a registration identical to what the ID holds keeps its view and the registration generation (`vc_get` in `nvn_mtl.m`). Kept by serial until PR #2542; the key by Metal texture also covers [finalized textures read through a registered ID](#texture-views-re-made-for-finalized-textures-every-submission) and [render targets initialized again every frame](frame-rate.md#texture-views-made-again-for-render-targets-initialized-again-every-frame).
 - **Found on:** [Hyrule Warriors: Age of Calamity](../../dm/games/01002B00111A2000/README.md): 2,036 views were made in a 15-minute Mac battle run, 211 million reused; the replay before the cutscene went from 14.3 to 10.8 ms a frame.
 
 ### Texture views re-made for finalized textures every submission
@@ -1166,6 +1166,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Check:** `dm/gfx/tests/t_pull.m` (the words against Metal's fetch and the CPU conversion), `t_pull_inv.m` (a depth prepass with one pipeline and depth-equal with the other), `test_dmsh_pull.py`; `dm/ios/tests/test_profile_pack.py` packs tiny fixtures through the actual archive step and checks runtime-prebuild library inclusion, explicit overrides and an IPA with a pipeline archive in the ZIP.
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md): draws that waited for their pipeline on a cold start. [The Legend of Zelda: Echoes of Wisdom](../../dm/games/01008CF01BAAC000/README.md#found-on-this-game): an iPhone build whose launcher toggles built no bases (issue #1684).
 
+### Absent vertex attributes lose W
+
+- **Symptom:** a projectile paints the floor but its airborne mesh is invisible, without a missing-shader error.
+- **Cause:** the native vertex descriptor and the pulling decoder supplied four zero words for an absent attribute (format 0). The shader instead needs the default float vector `(0, 0, 0, 1)` as raw register bits, including when its Metal declaration uses integers. An alpha-tested depth pass can discard every fragment when that W component contributes to opacity; a color pass with depth EQUAL then draws nothing.
+- **Fix:** `vertex_constants` provides the default vector at offset 16 of slot 30 for active absent inputs in `pso_desc`; inactive shadow declarations and unknown formats still read zeros at offset 0. `dm_fetch` supplies the same default for format 0. `pull_layout_fill` preserves nonzero formats with missing buffers so the decoder can distinguish them from absent attributes and keep their zero reads. Unknown formats and invalid streams still read zeros.
+- **Check:** `t_default_attrib` checks float, signed, and unsigned native inputs (beyond `S.nattr`, explicitly absent, and unknown format) as well as shadow-input pipelines with both active shadowed and absent attributes. `t_pull` checks the pulling default, missing buffers, invalid streams, and unknown formats alongside its format comparisons.
+- **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md#rendering), the Slosher projectile's alpha-tested depth pass ([#3181](https://github.com/seedds/nxnative/issues/3181)).
+
 ### Float32 vertex padding through integer inputs
 
 - **Symptom:** a fullscreen post-process draw writes no color, then a later blur composite darkens scenery while the character remains visible.
@@ -1770,6 +1778,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Found on:** [Metroid Dread](../../dm/games/010093801237C000/README.md).
 - **Note:** 04's Metroid Dread section (at `6a06877`) still described the old behaviour ("every copy or update ends the host's render pass"); the deferral came later (development.md's Power section), and it is now the default (`ubd_on` in `nvn_mtl.m`, off with `DM_NVN_UB_DEFER=0`).
 
+### Deferred inline updates reach geometry-stage mesh bindings
+
+- **Symptom:** an inline buffer update is applied after a geometry shader running as a mesh draw, so the shader sees stale uniforms, storage data or indices, or its storage writes are overwritten at the end of the render pass.
+- **Cause:** `geo_mesh_draw` passes a synthetic vertex/fragment-only program and `di = NULL` to the normal draw path. Its deferred-update conflict check therefore cannot see the lean geometry kernel's stage-2 buffer bindings or an indexed draw's index buffer, even though the mesh function reads both.
+- **Fix:** before the synthetic draw, check the selected lean kernel's stage-2 bindings (`ubd_conflict_sh`) and any indexed draw's index buffer range (`ubd_hits`), landing conflicting updates before encoding the mesh draw. Non-conflicting updates and uniform reads that can use a complete or partial shadow keep their deferral. The compute fallback already lands updates before its geometry dispatch.
+- **Found on:** the stage-2 uniform conflict reported in [Wolfenstein: Youngblood, issue #1314](https://github.com/seedds/nxnative/issues/1314); reproduced independently in `check_t_geometry_mesh` with geometry-stage storage counters and indexed mesh draws (the game's profile and remaining visual issues remain open).
+
 ### Partial-cover uniform shadows keep passes open
 
 - **Symptom:** hundreds of render passes a frame and heavy attachment traffic when a game updates a small part of a large uniform block before each draw group.
@@ -1890,6 +1905,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Cause:** the tiled resolve entry points reached the unimplemented-call stub, leaving their destination textures unchanged. Ordinary `Downsample` already recorded a resolve.
 - **Fix:** `TiledDownsample` and `TiledDownsampleTextureView` use the same recorded resolve as their ordinary counterparts. Texture descriptors and the selected views are copied when recorded; the resolve runs in submission order. Tegra tiled-cache scheduling hints remain host no-ops. This adds no new format, size-conversion or sample-count support to the existing resolve path.
 - **Found on:** Ikaruga 1.0.2, reported by [hada0127 in issue #592](https://github.com/seedds/nxnative/issues/592), with a [source-only patch](https://gist.github.com/hada0127/5cf963267ae4e0da47ecf8e150c7bdf6). The report's independent SDK audio-layout failure is separate. No repository game profile or current gameplay validation is provided by this change.
+
+### Multisample `Downsample` between different sizes
+
+- **Symptom:** `[RED] Downsample case not implemented: 1920x1080 4 samples format 92 → 1280x720 1 samples format 92`; handheld mode renders black while docked mode works.
+- **Cause:** Metal requires a render pass's `resolveTexture` to match the multisample source attachment's dimensions, so `copy_t2t_enc` (`DM_COPY_RESOLVE`) rejected multisample resolves when the source and destination level sizes differed. A game that allocates its MSAA render target at docked size (`1920x1080`) and renders handheld frames into the `1280x720` corner hits this path on `nvnCommandBufferDownsample`.
+- **Fix:** when `s.sampleCount > 1`, `d.sampleCount == 1`, `s.pixelFormat == d.pixelFormat`, and the source and destination level sizes differ, `copy_t2t_enc` resolves into a cached private staging texture matching `(sw, sh, pf)` (up to 4 slots, deferred release on eviction) and blits the common `(0, 0, min(sw, dw), min(sh, dh))` corner unscaled into the destination.
+- **Found on:** [Digimon Story Time Stranger](../../dm/games/010062E01FE0C000/README.md) ([issue #872](https://github.com/seedds/nxnative/issues/872)): handheld mode (`DM_OPMODE=0`) resolves `1920x1080` 4x `RG11B10Float` into `1280x720` 1x every frame.
+- **Check:** `make -C dm/gfx/tests GAME=010015100B514000 check_t_tiled_resolve` (97 checks under `MTL_DEBUG_LAYER=1` for both `DM_NVN_ENC_THREAD=0` and `1`, including `16x12` 4x → `8x6` 1x and `8x6` 4x → `16x12` 1x unscaled corner checks).
 
 ### Depth-stencil copies carry the stencil
 
@@ -2068,15 +2091,8 @@ The Vulkan layer (`dm/gfx/vk/hle_vk.m`) was written for Hades. Super Mario Galax
 
 - **Symptom:** the host aborts on Metal's compiler queue (`findOrCreateComputeFastClearPipeline`, `[AGX] Failed assertion "error == MTLCompilerErrorNoError"`) seconds into the game, with or without the pipeline prebuild, while `MTLCompilerService` crash reports show `EXC_BAD_ACCESS` in `llvm::ExtractElementInst` under `AGCLLVMStatelessFragmentObject::buildBlendFactor` (`AGCLLVMStatelessPSODynamicLibrary::compile`).
 - **Cause:** target 0 blends with a `SRC1` factor and the pixel shader writes outputs 0 and 1. NVN, as Maxwell, takes output 1 as target 0's second source; the translator declares it `[[color(1)]]`, and Metal reads a second source only from `[[color(0), index(1)]]`. With no such output, Metal 4's blend compiler crashes building the pipeline's colour state ([An unwritten secondary blend source](#an-unwritten-secondary-blend-source) left a written output 1 alone).
-- **Fix:** `dmsh_entry.py` `fs_dual` gives a pixel shader listed in the profile's `dual_want.tsv` that writes exactly colours 0 and 1 a second entry point, `main0_d`, the same body with output 1 as `[[color(0), index(1)]]` (`entry_d` in its reflection). `pso_desc` takes it for a pipeline whose output-0 target blends with a `SRC1` factor (`pso_reads_src1`); output 1's attachment, if the pass has one, is then left unwritten, as on Maxwell. A shader without the entry point blends with zero for the second source, as an unwritten one, with a red line naming it, and `DM_NVN_DUAL_WANT=<file>` appends every such key to a file for the profile's list. Only listed shaders get the entry point: 5,474 of Arceus's 6,156 pixel shaders write exactly colours 0 and 1, nearly all for a second render target. `t_missing_src1` checks both Metal pipeline paths with the entry point.
-- **Found on:** [Pokémon Legends: Arceus](../../dm/games/01001F5010DFA000/README.md): `f4f36a03b0c6691d` (`system_resource/gfx2/shader/env/system/ha_post_effects.bnsh`, variation 4: RGBA16Float, destination factor `SRC1_ALPHA`) and `ff45da02e225f961`, in the first minute.
-
-### A shader added to `dual_want.tsv` keeps its cached build
-
-- **Symptom:** adding a pixel shader to the profile's `dual_want.tsv` leaves the build reporting cache hits, the reflection without `entry_d`, and the host logging `[RED] shader ... has no dual-source entry point`.
-- **Cause:** `dmsh_build.py` selects the extra `main0_d` entry point through `DUAL_WANT`, but the per-shader cache key did not include membership in that set. The packing script noticed the table change and reran the builder, which restored the old variant.
-- **Fix:** `shader_key` includes the shader's membership in `DUAL_WANT`. Adding or removing a key invalidates that shader's cached variant; unrelated entries leave its key unchanged. The existing paired-pixel dependency also updates paired vertex keys. No cache deletion is required.
-- **Found on:** [The Legend of Zelda: Skyward Sword HD, issue #928](https://github.com/seedds/nxnative/issues/928), `01002DA013484000`: Link's eye shader and three other dual-source shaders. The fog reported there had another cause: [Logic operations through a library of its own](#logic-operations-through-a-library-of-its-own).
+- **Fix:** `dmsh_entry.py` `fs_uint` gives every pixel shader's `main0_u` in the lazily-loaded side library `<key>_bx` a bool function constant `DMSH_TYPED_DUAL_FC` (`dm_du`, `entry_u_dual` in the reflection) whenever colours 0 and 1 share a width and every colour >= 1 is typed: with `dm_du` on, output 1 is returned as `[[color(0), index(1)]]` and outputs 1..7 are absent (the alpha test `dm_at` still runs when enabled). `pso_desc` specializes `main0_u` through `typed_fn` whenever target 0 is non-integer and blends with a `SRC1` factor (`pso_reads_src1`), and marks attachments 1..7 unwritten, as on Maxwell. A shader without dual-source support blends with zero for the second source, with a red line naming it. This replaces the earlier per-game `dual_want.tsv` allowlist, `DM_NVN_DUAL_WANT` and `main0_d` entry point (which originally kept dual-source out of `<key>_b` before `<key>_bx` existed, and required playing through every scene to discover shaders — nine profiles had accumulated 542 keys, including Skyward Sword HD's 432 and FINAL FANTASY XII's 27 across two rounds). `t_missing_src1` and `t_typed_outputs` check both Metal pipeline paths.
+- **Found on:** [Pokémon Legends: Arceus](../../dm/games/01001F5010DFA000/README.md): `f4f36a03b0c6691d` (`system_resource/gfx2/shader/env/system/ha_post_effects.bnsh`, variation 4: RGBA16Float, destination factor `SRC1_ALPHA`) and `ff45da02e225f961`, in the first minute; [FINAL FANTASY XII THE ZODIAC AGE](../../dm/games/0100EB100AB42000/README.md) (PR #2736: 7 more `/gamedata/nvn/branch_shader/*.fpo` limit-break shaders missed by the initial 20-key list prompted moving dual-source into `main0_u`).
 
 ### Dual-source blending from output location 1
 
@@ -2570,11 +2586,27 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 
 ### Desktop GLSL 1.10 and 1.20 from runtime generators
 
-- **Symptom:** captured desktop GLSL fails with `Desktop shaders for Vulkan SPIR-V require version 140 or higher` or with an undeclared `gl_TexCoord` or `gl_Color`.
-- **Cause:** MojoShader emits desktop compatibility GLSL 1.20 and names its built-in varyings through macros.
-- **Fix:** promote explicit desktop versions 110 and 120 through the existing GLSL ES 1.00 compatibility rewrite. After preprocessing, make the front colors, fog coordinate and constant-index texture coordinates explicit, with matching names across stages. Constant-index fragment outputs keep their locations.
-- **Limits:** this covers the programmable varyings used by MojoShader. Fixed-function vertex inputs, back-face color selection and dynamically indexed legacy arrays are outside this path.
-- **Found on:** Timespinner 1.0.0 ([PR #1864](https://github.com/seedds/nxnative/pull/1864)).
+- **Symptom:** captured desktop GLSL fails with `Desktop shaders for Vulkan SPIR-V require version 140 or higher`, an undeclared `gl_TexCoord` or `gl_Color`, `cannot convert from 'const int' to 'temp highp float'`, or `sampler/image : type requires declaration of default precision qualifier` on `sampler3D` / `texture3D`.
+- **Cause:** legacy desktop GLSL (`#version 110`/`120`/`130`) relies on `attribute`, `varying`, `gl_FragColor`, `texture3D*`, implicit `int`-to-`float` conversions, and desktop samplers without ES precision qualifiers; promoting it to `#version 310 es` rejected desktop implicit conversions and `sampler3D`.
+- **Fix:** promote explicit desktop versions 110, 120 and 130 to `#version 450 core` (while keeping unversioned / `#version 100` on `#version 310 es`) and rewrite `texture3D`/`texture3DLod`/`texture3DProj` in `OLD_TEX`. After preprocessing, make the front colors, fog coordinate and constant-index texture coordinates explicit, with matching names across stages. Constant-index fragment outputs keep their locations.
+- **Limits:** this covers the programmable varyings used by MojoShader and desktop `#version 120` renderers. Fixed-function vertex inputs, back-face color selection and dynamically indexed legacy arrays are outside this path.
+- **Found on:** Timespinner 1.0.0 ([PR #1864](https://github.com/seedds/nxnative/pull/1864)) and Darkest Dungeon ([PR #2034](https://github.com/seedds/nxnative/pull/2034), [issue #3021](https://github.com/seedds/nxnative/issues/3021)).
+
+### Explicit sampler `layout(binding)` and `GL_TEXTURE_SWIZZLE_RGBA`
+
+- **Symptom:** multi-planar movie shaders that declare `layout(binding = 0)` / `layout(binding = 1)` without calling `glUniform1i` sample every plane from texture unit 0 (green NV12 video), and `glTexParameteriv(..., GL_TEXTURE_SWIZZLE_RGBA, ...)` logs `[RED] glTexParameter(0x8e46) not implemented`.
+- **Cause:** `gl_shaders.py` did not record explicit GLSL `layout(binding = N)` sampler units in `gl_shaders.tsv`, so `glLinkProgram` always initialized every sampler to unit 0; `hle_gl.m` handled individual `GL_TEXTURE_SWIZZLE_R..A` parameters but not the 4-component `GL_TEXTURE_SWIZZLE_RGBA` vector form.
+- **Fix:** `gl_shaders.py` records non-zero explicit `layout(... binding = N ...)` sampler bindings as an optional fifth colon-separated field on `t:` rows (leaving unqualified samplers at 0, distinct from glslang `--amb` auto-assignments), and `glLinkProgram` initializes `u->unit` from that field. `glTexParameteriv` and `glTexParameterfv` apply `GL_TEXTURE_SWIZZLE_RGBA` across all four channels.
+- **Check:** `test_gl_shaders.py` and `make -C dm/gfx/tests GAME=010014E00DB56000 gl-imports gl-arguments`.
+- **Found on:** Darkest Dungeon ([PR #2034](https://github.com/seedds/nxnative/pull/2034), [issue #3021](https://github.com/seedds/nxnative/issues/3021)).
+
+### Embedded `main` GLSL or `.glsl` templates suppressing `DM_GL_CAPTURE`
+
+- **Symptom:** an OpenGL game boots with audio and advancing frames but shows a black screen, logging only a few shader table entries (from `main`) and `[RED] vertex/fragment shader <key> is not in the library (DM_GL_CAPTURE collects it)` for its game shaders.
+- **Cause:** `profile_guess.py` turned `gl_capture` off whenever `main` contained any embedded GLSL string (`gl_src > 0`) or the RomFS contained any `.glsl` filename by extension alone, and `build_ipa_from_nsp.py` did not fall back to capture when offline `.glsl` files failed to translate standalone or when a profile provided `gl_capture.tsv`.
+- **Fix:** `profile_guess.py` only suppresses `gl_capture` when standalone RomFS shader files are present (ignoring `gl_src` alone and requiring `.glsl` files to define `void main()`), and `build_ipa_from_nsp.py` honors `gl_capture.tsv` and falls back to Mac `DM_GL_CAPTURE` when offline translation yields only `main`'s embedded shaders or fails with no translated RomFS shaders.
+- **Check:** `test_profile_guess.py`, `test_gl_shaders.py`, and `test_nsp_incremental.py`.
+- **Found on:** Darkest Dungeon Complete (`01008F1008DA6000`, [issue #3021](https://github.com/seedds/nxnative/issues/3021)).
 
 ### GL capture compiles missing shaders
 
